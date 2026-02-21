@@ -2,11 +2,17 @@ import sys
 import subprocess
 import math
 import random
-from PyQt6.QtWidgets import QApplication, QWidget, QGraphicsView, QGraphicsScene, QListWidget, QListWidgetItem, QLabel, QVBoxLayout, QHBoxLayout
-from PyQt6.QtGui import QPen, QColor, QFont, QBrush
-from PyQt6.QtCore import QTimer, Qt, QUrl
-from PyQt6.QtMultimedia import QSoundEffect
+import threading
+import simpleaudio as sa
 
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QGraphicsView, QGraphicsScene,
+    QListWidget, QListWidgetItem, QLabel, QVBoxLayout, QHBoxLayout
+)
+from PyQt6.QtGui import QPen, QColor, QFont, QBrush
+from PyQt6.QtCore import QTimer, Qt
+
+# HUD i radar
 WIDTH = 1400
 HEIGHT = 800
 RADAR_SIZE = 800
@@ -15,18 +21,16 @@ CENTER_Y = HEIGHT // 2
 HUD_GREEN = QColor(0, 255, 120)
 SWEEP_COLOR = QColor(0, 255, 120, 50)
 
-# Tworzenie profilu sieci na podstawie nazwy
+# Prosta funkcja wykrywająca typ sieci
 def detect_profile(ssid):
     s = ssid.lower()
     if "mobile" in s or "4g" in s or "lte" in s:
         return "MOBILE"
-    elif "home" in s or "wifi" in s or "router" in s:
+    elif "home" in s or "wifi" in s:
         return "HOME"
-    elif "router" in s:
-        return "ROUTER"
     return "UNKNOWN"
 
-# Funkcja skanująca Wi-Fi
+# Skanowanie sieci Wi-Fi
 def scan_wifi():
     subprocess.run(["nmcli","dev","wifi","rescan"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     result = subprocess.run(["nmcli","-t","-f","SSID,SIGNAL,BSSID","dev","wifi","list"], capture_output=True, text=True)
@@ -47,6 +51,17 @@ def scan_wifi():
         })
     return nets
 
+# Funkcja odtwarzająca ping.wav w wątku
+def play_ping():
+    def _play():
+        try:
+            wave_obj = sa.WaveObject.from_wave_file("ping.wav")
+            wave_obj.play()
+        except Exception as e:
+            print("Error playing sound:", e)
+    threading.Thread(target=_play, daemon=True).start()
+
+# Klasa HUD
 class HUD(QWidget):
     def __init__(self):
         super().__init__()
@@ -82,11 +97,6 @@ class HUD(QWidget):
         self.panel_layout.addWidget(self.panel_info)
         self.panel_list.itemClicked.connect(self.show_info)
 
-        # Dźwięk ping
-        self.ping_sound = QSoundEffect()
-        self.ping_sound.setSource(QUrl.fromLocalFile("ping.wav"))
-        self.ping_sound.setVolume(0.5)
-
         # HUD variables
         self.positions = {}  # bssid -> [angle,radius]
         self.nets = []
@@ -94,8 +104,9 @@ class HUD(QWidget):
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_hud)
-        self.timer.start(100)  # update co 0.1s
+        self.timer.start(200)  # wolniejsza animacja
 
+    # Siatka
     def draw_grid(self):
         pen = QPen(QColor(0,255,120,30))
         step = 80
@@ -106,13 +117,12 @@ class HUD(QWidget):
         for r in range(100,RADAR_SIZE//2,100):
             self.scene.addEllipse(CENTER_X-r, CENTER_Y-r, r*2, r*2, QPen(QColor(0,255,120,50)))
 
+    # Kliknięcie w panel boczny
     def show_info(self, item):
         key = item.data(Qt.ItemDataRole.UserRole)
         net = next((n for n in self.nets if n['id']==key), None)
         if net:
-            # Odtwarzanie dźwięku
-            self.ping_sound.play()
-            # Pełny BSSID i info
+            play_ping()  # ping w wątku
             self.panel_info.setText(
                 f"SSID: {net['ssid']}\n"
                 f"Signal: {net['signal']}%\n"
@@ -121,6 +131,7 @@ class HUD(QWidget):
                 f"Profile: {net['profile']}"
             )
 
+    # Aktualizacja HUD
     def update_hud(self):
         self.scene.clear()
         self.draw_grid()
@@ -168,8 +179,6 @@ class HUD(QWidget):
             else: c = QColor(255,80,80)
 
             self.scene.addEllipse(x-5, y-5, 10, 10, QPen(c), QBrush(c))
-
-            # Etykieta SSID na radarze
             t = self.scene.addText(n['ssid'], QFont("Courier New",9))
             t.setDefaultTextColor(c)
             t.setPos(x+8, y-6)
