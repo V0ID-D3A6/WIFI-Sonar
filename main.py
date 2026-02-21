@@ -1,191 +1,181 @@
-import sys  
-import subprocess  
-import math  
-import random  
-from PyQt6.QtWidgets import QApplication, QGraphicsView, QGraphicsScene, QGraphicsTextItem  
-from PyQt6.QtGui import QPen, QColor, QFont, QBrush  
-from PyQt6.QtCore import QTimer, Qt  
-import os  
-  
-WIDTH = 1400  
-HEIGHT = 800  
-RADAR_SIZE = 800  
-CENTER_X = RADAR_SIZE // 2  
-CENTER_Y = HEIGHT // 2  
-MAX_RADIUS = 360  
-PANEL_X = RADAR_SIZE + 20  
-HUD_GREEN = QColor(0, 255, 120)  
-  
-PING_FILE = "ping.wav"  
-if not os.path.isfile(PING_FILE):  
-    os.system(f"sox -n -r 44100 -b 16 {PING_FILE} synth 0.05 sine 880")  
-  
-def scan_wifi():  
-    result = subprocess.run(  
-        ["nmcli", "-t", "-f", "SSID,SIGNAL", "dev", "wifi", "list"],  
-        capture_output=True,  
-        text=True  
-    )  
-    nets = []  
-    for line in result.stdout.splitlines():  
-        if not line:  
-            continue  
-        p = line.split(":")  
-        if len(p) != 2:  
-            continue  
-        ssid, signal = p  
-        nets.append({  
-            "ssid": ssid if ssid else "<hidden>",  
-            "signal": int(signal)  
-        })  
-    return nets  
-  
-class HUD(QGraphicsView):  
-    def __init__(self):  
-        super().__init__()  
-        self.setWindowTitle("WiFi SONAR — WD HUD v7")  
-        self.setFixedSize(WIDTH, HEIGHT)  
-        self.setStyleSheet("background-color: black;")  
-        self.scene = QGraphicsScene(0, 0, WIDTH, HEIGHT)  
-        self.setScene(self.scene)  
-  
-        self.sonar_r = 0  
-        self.full = False  
-        self.positions = {}  # ssid -> [angle, radius]  
-        self.triggered_ssid = set()  
-        self.glitch_effects = {}  
-        self.scanlines_offset = 0  
-        self.rotation_speed = 0.01  # radian/frame  
-  
-        self.timer = QTimer()  
-        self.timer.timeout.connect(self.draw)  
-        self.timer.start(60)  
-  
-    def keyPressEvent(self, e):  
-        if e.key() == Qt.Key.Key_F11:  
-            self.full = not self.full  
-            self.showFullScreen() if self.full else self.showNormal()  
-        if e.key() == Qt.Key.Key_Escape and self.full:  
-            self.full = False  
-            self.showNormal()  
-  
-    def draw_grid(self):  
-        pen = QPen(QColor(0, 255, 120, 20))  
-        step = 80  
-        for x in range(0, RADAR_SIZE, step):  
-            self.scene.addLine(x, 0, x, HEIGHT, pen)  
-        for y in range(0, HEIGHT, step):  
-            self.scene.addLine(0, y, RADAR_SIZE, y, pen)  
-  
-    def draw_scanlines(self):  
-        self.scanlines_offset += 2  
-        if self.scanlines_offset > HEIGHT:  
-            self.scanlines_offset = 0  
-        pen = QPen(QColor(0, 255, 120, 50))  
-        for y in range(-20, HEIGHT, 20):  
-            self.scene.addLine(0, y + self.scanlines_offset, RADAR_SIZE, y + self.scanlines_offset, pen)  
-  
-    def draw(self):  
-        self.scene.clear()  
-        self.draw_grid()  
-        self.draw_scanlines()  
-  
-        # CENTER  
-        self.scene.addEllipse(CENTER_X - 6, CENTER_Y - 6, 12, 12, QPen(HUD_GREEN), QBrush(HUD_GREEN))  
-  
-        # STATIC RINGS  
-        for r in range(120, MAX_RADIUS + 1, 120):  
-            self.scene.addEllipse(CENTER_X - r, CENTER_Y - r, r * 2, r * 2, QPen(QColor(0, 255, 120, 30)))  
-  
-        # SONAR WAVE  
-        self.scene.addEllipse(CENTER_X - self.sonar_r, CENTER_Y - self.sonar_r, self.sonar_r * 2, self.sonar_r * 2,  
-                              QPen(QColor(0, 255, 120, 120)))  
-  
-        self.sonar_r += 3  
-        if self.sonar_r > MAX_RADIUS:  
-            self.sonar_r = 0  
-            self.triggered_ssid.clear()  
-            self.glitch_effects.clear()  
-  
-        nets = scan_wifi()  
-  
-        # PANEL BOCZNY  
-        panel_title = QGraphicsTextItem("NETWORKS")  
-        panel_title.setFont(QFont("Courier New", 14, QFont.Weight.Bold))  
-        panel_title.setDefaultTextColor(HUD_GREEN)  
-        panel_title.setPos(PANEL_X, 20)  
-        self.scene.addItem(panel_title)  
-        y_offset = 60  
-  
-        for n in nets:  
-            ssid = n["ssid"]  
-            signal = n["signal"]  
-  
-            if ssid not in self.positions:  
-                # radius zależny od sygnału, kąty losowe  
-                radius = max(50, (100 - signal) * 3)  
-                angle = random.uniform(0, 2 * math.pi)  
-                self.positions[ssid] = [angle, radius]  
-  
-            # ROTATION  
-            self.positions[ssid][0] += self.rotation_speed  
-            angle = self.positions[ssid][0]  
-            radius = self.positions[ssid][1]  
-  
-            x = CENTER_X + math.cos(angle) * radius  
-            y = CENTER_Y + math.sin(angle) * radius  
-  
-            if signal >= 60:  
-                c = QColor(0, 255, 120)  
-            elif signal >= 40:  
-                c = QColor(255, 200, 0)  
-            else:  
-                c = QColor(255, 80, 80)  
-  
-            # POINT  
-            self.scene.addEllipse(x - 4, y - 4, 8, 8, QPen(c), QBrush(c))  
-  
-            # LABEL + GLITCH EFFECT  
-            show_label = False  
-            if self.sonar_r >= radius - 6 and self.sonar_r <= radius + 6:  
-                show_label = True  
-                if ssid not in self.triggered_ssid:  
-                    os.system(f"aplay -q {PING_FILE} &")  
-                    self.triggered_ssid.add(ssid)  
-                    self.glitch_effects[ssid] = 6  
-  
-            if ssid in self.glitch_effects and self.glitch_effects[ssid] > 0:  
-                flash_c = QColor(random.randint(0, 255), 255, random.randint(0, 255))  
-                t = QGraphicsTextItem(ssid)  
-                t.setFont(QFont("Courier New", 11, QFont.Weight.Bold))  
-                t.setDefaultTextColor(flash_c)  
-                t.setPos(x + random.randint(-2, 2), y + random.randint(-2, 2))  
-                self.scene.addItem(t)  
-                self.glitch_effects[ssid] -= 1  
-            elif show_label:  
-                t = QGraphicsTextItem(ssid)  
-                t.setFont(QFont("Courier New", 9))  
-                t.setDefaultTextColor(c)  
-                t.setPos(x + 8, y - 6)  
-                self.scene.addItem(t)  
-  
-            # PANEL ENTRY  
-            line = QGraphicsTextItem(f"{ssid}  [{signal}%]")  
-            line.setFont(QFont("Courier New", 10))  
-            line.setDefaultTextColor(c)  
-            line.setPos(PANEL_X, y_offset)  
-            self.scene.addItem(line)  
-            y_offset += 22  
-  
-        # GREEN FLASHES AROUND CENTER  
-        for i in range(2):  
-            r_flash = self.sonar_r + i * 15  
-            alpha = max(0, 120 - i*40)  
-            self.scene.addEllipse(CENTER_X - r_flash, CENTER_Y - r_flash, r_flash * 2, r_flash * 2,  
-                                  QPen(QColor(0, 255, 120, alpha)))  
-  
-if __name__ == "__main__":  
-    app = QApplication(sys.argv)  
-    hud = HUD()  
-    hud.show()  
-    sys.exit(app.exec())  
+import sys
+import subprocess
+import math
+import random
+from PyQt6.QtWidgets import QApplication, QWidget, QGraphicsView, QGraphicsScene, QListWidget, QListWidgetItem, QLabel, QVBoxLayout, QHBoxLayout
+from PyQt6.QtGui import QPen, QColor, QFont, QBrush
+from PyQt6.QtCore import QTimer, Qt, QUrl
+from PyQt6.QtMultimedia import QSoundEffect
+
+WIDTH = 1400
+HEIGHT = 800
+RADAR_SIZE = 800
+CENTER_X = RADAR_SIZE // 2
+CENTER_Y = HEIGHT // 2
+HUD_GREEN = QColor(0, 255, 120)
+SWEEP_COLOR = QColor(0, 255, 120, 50)
+
+# Tworzenie profilu sieci na podstawie nazwy
+def detect_profile(ssid):
+    s = ssid.lower()
+    if "mobile" in s or "4g" in s or "lte" in s:
+        return "MOBILE"
+    elif "home" in s or "wifi" in s or "router" in s:
+        return "HOME"
+    elif "router" in s:
+        return "ROUTER"
+    return "UNKNOWN"
+
+# Funkcja skanująca Wi-Fi
+def scan_wifi():
+    subprocess.run(["nmcli","dev","wifi","rescan"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    result = subprocess.run(["nmcli","-t","-f","SSID,SIGNAL,BSSID","dev","wifi","list"], capture_output=True, text=True)
+    nets=[]
+    for line in result.stdout.splitlines():
+        if not line.strip(): continue
+        parts=line.split(":")
+        if len(parts)<3: continue
+        ssid, signal, bssid = parts[0] or "<hidden>", parts[1], parts[2]
+        try: signal=int(signal)
+        except ValueError: signal=0
+        nets.append({
+            "id":bssid,
+            "ssid":ssid,
+            "signal":signal,
+            "status":"CONNECTED" if signal>75 else ("ACTIVE" if signal>40 else "WEAK"),
+            "profile":detect_profile(ssid)
+        })
+    return nets
+
+class HUD(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("WiFi SONAR – Watch Dogs HUD")
+        self.setFixedSize(WIDTH, HEIGHT)
+        self.setStyleSheet("background-color:black;")
+        self.layout = QHBoxLayout()
+        self.setLayout(self.layout)
+
+        # Radar
+        self.view = QGraphicsView()
+        self.view.setFixedSize(RADAR_SIZE, HEIGHT)
+        self.scene = QGraphicsScene(0, 0, RADAR_SIZE, HEIGHT)
+        self.view.setScene(self.scene)
+        self.layout.addWidget(self.view)
+
+        # Panel boczny
+        self.panel_widget = QWidget()
+        self.panel_layout = QVBoxLayout()
+        self.panel_widget.setLayout(self.panel_layout)
+        self.layout.addWidget(self.panel_widget)
+
+        # Lista sieci
+        self.panel_list = QListWidget()
+        self.panel_layout.addWidget(self.panel_list)
+
+        # Info panel
+        self.panel_info = QLabel()
+        self.panel_info.setStyleSheet(
+            "color: rgb(0,255,120); font-family:Courier New; font-size:14px; background-color:black;"
+        )
+        self.panel_info.setWordWrap(True)
+        self.panel_layout.addWidget(self.panel_info)
+        self.panel_list.itemClicked.connect(self.show_info)
+
+        # Dźwięk ping
+        self.ping_sound = QSoundEffect()
+        self.ping_sound.setSource(QUrl.fromLocalFile("ping.wav"))
+        self.ping_sound.setVolume(0.5)
+
+        # HUD variables
+        self.positions = {}  # bssid -> [angle,radius]
+        self.nets = []
+        self.sweep_angle = 0
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_hud)
+        self.timer.start(100)  # update co 0.1s
+
+    def draw_grid(self):
+        pen = QPen(QColor(0,255,120,30))
+        step = 80
+        for x in range(0,RADAR_SIZE,step):
+            self.scene.addLine(x,0,x,HEIGHT,pen)
+        for y in range(0,HEIGHT,step):
+            self.scene.addLine(0,y,RADAR_SIZE,y,pen)
+        for r in range(100,RADAR_SIZE//2,100):
+            self.scene.addEllipse(CENTER_X-r, CENTER_Y-r, r*2, r*2, QPen(QColor(0,255,120,50)))
+
+    def show_info(self, item):
+        key = item.data(Qt.ItemDataRole.UserRole)
+        net = next((n for n in self.nets if n['id']==key), None)
+        if net:
+            # Odtwarzanie dźwięku
+            self.ping_sound.play()
+            # Pełny BSSID i info
+            self.panel_info.setText(
+                f"SSID: {net['ssid']}\n"
+                f"Signal: {net['signal']}%\n"
+                f"Status: {net['status']}\n"
+                f"BSSID: {net['id']}\n"
+                f"Profile: {net['profile']}"
+            )
+
+    def update_hud(self):
+        self.scene.clear()
+        self.draw_grid()
+
+        # Center
+        self.scene.addEllipse(CENTER_X-6, CENTER_Y-6, 12, 12, QPen(HUD_GREEN), QBrush(HUD_GREEN))
+
+        # Radar sweep
+        self.sweep_angle += 0.05
+        if self.sweep_angle > 2*math.pi: self.sweep_angle -= 2*math.pi
+        sweep_length = RADAR_SIZE//2
+        end_x = CENTER_X + math.cos(self.sweep_angle) * sweep_length
+        end_y = CENTER_Y + math.sin(self.sweep_angle) * sweep_length
+        self.scene.addLine(CENTER_X, CENTER_Y, end_x, end_y, QPen(SWEEP_COLOR,2))
+
+        # Skanowanie sieci
+        self.nets = scan_wifi()
+        self.panel_list.clear()
+        for n in self.nets:
+            # Lista boczna z kolorami według sygnału
+            item = QListWidgetItem(n['ssid'])
+            if n['signal'] >= 60:
+                item.setForeground(QBrush(QColor(0,255,120)))
+            elif n['signal'] >= 40:
+                item.setForeground(QBrush(QColor(255,200,0)))
+            else:
+                item.setForeground(QBrush(QColor(255,80,80)))
+            item.setData(Qt.ItemDataRole.UserRole, n['id'])
+            self.panel_list.addItem(item)
+
+            # Pozycja punktu na radarze
+            if n['id'] not in self.positions:
+                angle = random.uniform(0,2*math.pi)
+                radius = max(50,(100-n['signal'])*3)
+                self.positions[n['id']] = [angle,radius]
+            angle,radius = self.positions[n['id']]
+            angle += 0.01
+            self.positions[n['id']][0] = angle
+            x = CENTER_X + math.cos(angle)*radius
+            y = CENTER_Y + math.sin(angle)*radius
+
+            # Kolor punktu
+            if n['signal']>=60: c = QColor(0,255,120)
+            elif n['signal']>=40: c = QColor(255,200,0)
+            else: c = QColor(255,80,80)
+
+            self.scene.addEllipse(x-5, y-5, 10, 10, QPen(c), QBrush(c))
+
+            # Etykieta SSID na radarze
+            t = self.scene.addText(n['ssid'], QFont("Courier New",9))
+            t.setDefaultTextColor(c)
+            t.setPos(x+8, y-6)
+
+if __name__=="__main__":
+    app = QApplication(sys.argv)
+    hud = HUD()
+    hud.show()
+    sys.exit(app.exec())
